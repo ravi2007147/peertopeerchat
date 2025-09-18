@@ -1,0 +1,3 @@
+([('PeerToPeerChat',
+   '/Users/smayra/peertopeer/src/dist/PeerToPeerChat',
+   'EXECUTABLE')],)

@@ -21,8 +21,6 @@ echo "Creating standalone executable..."
 pyinstaller --onefile \
     --windowed \
     --name "PeerToPeerChat" \
-    --icon=icon.ico \
-    --add-data "README.md;." \
     --hidden-import=PyQt5.QtCore \
     --hidden-import=PyQt5.QtGui \
     --hidden-import=PyQt5.QtWidgets \
@@ -37,6 +35,9 @@ pyinstaller --onefile \
     --hidden-import=base64 \
     --hidden-import=os \
     --hidden-import=sys \
+    --hidden-import=uuid \
+    --hidden-import=sqlite3 \
+    --hidden-import=shutil \
     index.py
 
 # Check if build was successful

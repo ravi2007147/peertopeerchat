@@ -13,6 +13,7 @@ import asyncio
 import websockets
 import sqlite3
 import uuid
+import platform
 from datetime import datetime
 from typing import Dict, List, Optional
 from cryptography.fernet import Fernet
@@ -24,7 +25,8 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QLineEdit, QPushButton, QListWidget, QLabel, QSplitter,
     QScrollArea, QFrame, QFileDialog, QMessageBox, QProgressBar,
-    QTabWidget, QGroupBox, QGridLayout, QComboBox, QSpinBox
+    QTabWidget, QGroupBox, QGridLayout, QComboBox, QSpinBox,
+    QDialog, QAction
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
 from PyQt5.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
@@ -34,6 +36,525 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, B
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
+
+class FirewallConfigDialog(QDialog):
+    """Dialog showing platform-specific firewall configuration instructions"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Firewall Configuration")
+        self.setModal(True)
+        self.resize(800, 600)
+        
+        # Set light theme for the dialog
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #ffffff;
+                color: #000000;
+            }
+            QLabel {
+                color: #000000;
+                background-color: transparent;
+            }
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+            QTextEdit {
+                background-color: #f8f9fa;
+                color: #000000;
+                border: 1px solid #dee2e6;
+                border-radius: 5px;
+                padding: 10px;
+                font-family: 'Courier New', monospace;
+                font-size: 11px;
+            }
+        """)
+        
+        # Get platform-specific instructions
+        self.platform = platform.system().lower()
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Setup the UI based on platform"""
+        layout = QVBoxLayout()
+        
+        # Title
+        title = QLabel("🔥 Firewall Configuration Required")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #e74c3c; margin: 10px;")
+        layout.addWidget(title)
+        
+        # Platform info
+        platform_label = QLabel(f"Detected Platform: {self.platform.title()}")
+        platform_label.setStyleSheet("font-size: 14px; font-weight: bold; margin: 5px;")
+        layout.addWidget(platform_label)
+        
+        # Required ports info
+        ports_info = QLabel("Required Ports: UDP 8080 (Discovery), TCP 8081 (WebSocket)")
+        ports_info.setStyleSheet("font-size: 12px; color: #2c3e50; margin: 5px;")
+        layout.addWidget(ports_info)
+        
+        # Instructions text area
+        self.instructions_text = QTextEdit()
+        self.instructions_text.setReadOnly(True)
+        self.instructions_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 5px;
+                padding: 10px;
+                font-family: 'Courier New', monospace;
+                font-size: 11px;
+            }
+        """)
+        
+        # Set platform-specific instructions
+        instructions = self.get_platform_instructions()
+        self.instructions_text.setPlainText(instructions)
+        layout.addWidget(self.instructions_text)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        # Auto-configure firewall button
+        auto_btn = QPushButton("🔧 Auto-Configure Firewall")
+        auto_btn.clicked.connect(self.auto_configure_firewall)
+        auto_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """)
+        
+        # Test ports button
+        test_btn = QPushButton("🧪 Test Ports")
+        test_btn.clicked.connect(self.test_ports)
+        test_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #229954;
+            }
+        """)
+        
+        # Copy to clipboard button
+        copy_btn = QPushButton("📋 Copy Instructions")
+        copy_btn.clicked.connect(self.copy_instructions)
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        
+        # Close button
+        close_btn = QPushButton("✅ Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7f8c8d;
+            }
+        """)
+        
+        button_layout.addWidget(auto_btn)
+        button_layout.addWidget(test_btn)
+        button_layout.addWidget(copy_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+        
+    def get_platform_instructions(self):
+        """Get platform-specific firewall instructions"""
+        if self.platform == "darwin":  # macOS
+            return self.get_macos_instructions()
+        elif self.platform == "windows":
+            return self.get_windows_instructions()
+        else:  # Linux
+            return self.get_linux_instructions()
+            
+    def get_macos_instructions(self):
+        return """🍎 macOS Firewall Configuration
+
+🔧 AUTOMATIC CONFIGURATION (Recommended):
+Click the "Auto-Configure Firewall" button above to automatically configure your firewall. This will:
+- Add Python to firewall exceptions
+- Allow incoming connections for the application
+- Handle all necessary permissions
+
+📋 MANUAL CONFIGURATION:
+METHOD 1: System Preferences
+1. Open System Preferences → Security & Privacy → Firewall
+2. Click the lock to make changes (enter password)
+3. Click "Firewall Options..."
+4. Add Application: Click "+" and navigate to:
+   - Python: /usr/bin/python3
+   - Built app: ./dist/PeerToPeerChat
+5. Set to "Allow incoming connections"
+
+METHOD 2: Command Line
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/bin/python3
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /usr/bin/python3
+
+🧪 TESTING:
+# Check what's using ports
+lsof -i :8080
+lsof -i :8081
+
+# Check firewall status
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+
+🔧 TROUBLESHOOTING:
+- Try automatic configuration first
+- Ensure both UDP 8080 and TCP 8081 are allowed
+- Check that no antivirus is blocking network traffic
+- Verify both devices are on the same network"""
+
+    def get_windows_instructions(self):
+        return """🪟 Windows Firewall Configuration
+
+🔧 AUTOMATIC CONFIGURATION (Recommended):
+Click the "Auto-Configure Firewall" button above to automatically configure your firewall. This will:
+- Add UDP port 8080 (Discovery) to Windows Defender Firewall
+- Add TCP port 8081 (WebSocket) to Windows Defender Firewall
+- Handle all necessary permissions
+
+📋 MANUAL CONFIGURATION:
+METHOD 1: Windows Defender Firewall
+1. Open Windows Defender Firewall
+2. Click "Allow an app or feature through Windows Defender Firewall"
+3. Click "Change settings" (admin required)
+4. Click "Allow another app..."
+5. Browse to your Python executable or the built .exe file
+6. Check both "Private" and "Public" networks
+7. Click "OK"
+
+METHOD 2: Command Line (Run as Administrator)
+# Allow specific ports
+netsh advfirewall firewall add rule name="P2P Discovery" dir=in action=allow protocol=UDP localport=8080
+netsh advfirewall firewall add rule name="P2P WebSocket" dir=in action=allow protocol=TCP localport=8081
+
+🧪 TESTING:
+# Check what's using ports
+netstat -an | findstr 8080
+netstat -an | findstr 8081
+
+# Check firewall rules
+netsh advfirewall firewall show rule name="Peer-to-Peer Chat"
+
+🔧 TROUBLESHOOTING:
+- Try automatic configuration first
+- Run commands as Administrator
+- Ensure both UDP 8080 and TCP 8081 are allowed
+- Check Windows Defender isn't blocking the application
+- Verify both devices are on the same network"""
+
+    def get_linux_instructions(self):
+        return """🐧 Linux Firewall Configuration
+
+🔧 AUTOMATIC CONFIGURATION (Recommended):
+Click the "Auto-Configure Firewall" button above to automatically configure your firewall. This will:
+- Try UFW first (Ubuntu/Debian)
+- Fallback to iptables if UFW not available
+- Add UDP port 8080 and TCP port 8081
+- Handle all necessary permissions
+
+📋 MANUAL CONFIGURATION:
+METHOD 1: UFW (Ubuntu/Debian)
+# Allow specific ports
+sudo ufw allow 8080/udp
+sudo ufw allow 8081/tcp
+
+# Enable UFW if not already enabled
+sudo ufw enable
+
+METHOD 2: iptables
+# Allow UDP port 8080
+sudo iptables -A INPUT -p udp --dport 8080 -j ACCEPT
+
+# Allow TCP port 8081
+sudo iptables -A INPUT -p tcp --dport 8081 -j ACCEPT
+
+# Save rules (Ubuntu/Debian)
+sudo iptables-save > /etc/iptables/rules.v4
+
+METHOD 3: firewalld (CentOS/RHEL/Fedora)
+# Allow specific ports
+sudo firewall-cmd --permanent --add-port=8080/udp
+sudo firewall-cmd --permanent --add-port=8081/tcp
+
+# Reload firewall
+sudo firewall-cmd --reload
+
+🧪 TESTING:
+# Check what's using ports
+sudo netstat -tulpn | grep :8080
+sudo netstat -tulpn | grep :8081
+
+# Check UFW status
+sudo ufw status
+
+# Check iptables rules
+sudo iptables -L
+
+🔧 TROUBLESHOOTING:
+- Try automatic configuration first
+- Ensure both UDP 8080 and TCP 8081 are allowed
+- Check SELinux isn't blocking network access
+- Verify both devices are on the same network
+- Check system logs: sudo journalctl -f"""
+
+    def copy_instructions(self):
+        """Copy instructions to clipboard"""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.instructions_text.toPlainText())
+        QMessageBox.information(self, "Copied", "Instructions copied to clipboard!")
+        
+    def auto_configure_firewall(self):
+        """Automatically configure firewall for the current platform"""
+        import subprocess
+        import sys
+        
+        # Ask for confirmation
+        reply = QMessageBox.question(
+            self, 
+            "Auto-Configure Firewall", 
+            f"Automatically configure firewall for {self.platform.title()}?\n\nThis will attempt to:\n- Allow UDP port 8080 (Discovery)\n- Allow TCP port 8081 (WebSocket)\n\nNote: This may require administrator/sudo privileges.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+            
+        try:
+            if self.platform == "darwin":  # macOS
+                self.configure_macos_firewall()
+            elif self.platform == "windows":
+                self.configure_windows_firewall()
+            else:  # Linux
+                self.configure_linux_firewall()
+                
+            # Test ports after configuration
+            self.test_ports()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self, 
+                "Configuration Failed", 
+                f"Failed to configure firewall automatically:\n\n{str(e)}\n\nPlease use manual configuration instead."
+            )
+    
+    def configure_macos_firewall(self):
+        """Configure macOS firewall"""
+        import subprocess
+        
+        # Try to add Python to firewall exceptions
+        try:
+            # Get Python executable path
+            python_path = sys.executable
+            
+            # Add Python to firewall
+            result = subprocess.run([
+                'sudo', '/usr/libexec/ApplicationFirewall/socketfilterfw', 
+                '--add', python_path
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                print("✅ Added Python to macOS firewall")
+            else:
+                print(f"⚠️  Firewall add result: {result.stderr}")
+                
+            # Unblock Python
+            result = subprocess.run([
+                'sudo', '/usr/libexec/ApplicationFirewall/socketfilterfw', 
+                '--unblock', python_path
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                print("✅ Unblocked Python in macOS firewall")
+            else:
+                print(f"⚠️  Firewall unblock result: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            raise Exception("Firewall configuration timed out. Please run manually.")
+        except subprocess.CalledProcessError as e:
+            raise Exception(f"Firewall configuration failed: {e.stderr}")
+        except FileNotFoundError:
+            raise Exception("macOS firewall tools not found. Please configure manually.")
+    
+    def configure_windows_firewall(self):
+        """Configure Windows firewall"""
+        import subprocess
+        
+        try:
+            # Allow UDP port 8080
+            result = subprocess.run([
+                'netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                'name=P2P Discovery', 'dir=in', 'action=allow', 
+                'protocol=UDP', 'localport=8080'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                print("✅ Added UDP port 8080 to Windows firewall")
+            else:
+                print(f"⚠️  UDP rule result: {result.stderr}")
+            
+            # Allow TCP port 8081
+            result = subprocess.run([
+                'netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                'name=P2P WebSocket', 'dir=in', 'action=allow', 
+                'protocol=TCP', 'localport=8081'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                print("✅ Added TCP port 8081 to Windows firewall")
+            else:
+                print(f"⚠️  TCP rule result: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            raise Exception("Firewall configuration timed out. Please run manually.")
+        except subprocess.CalledProcessError as e:
+            raise Exception(f"Firewall configuration failed: {e.stderr}")
+        except FileNotFoundError:
+            raise Exception("Windows netsh not found. Please configure manually.")
+    
+    def configure_linux_firewall(self):
+        """Configure Linux firewall"""
+        import subprocess
+        
+        try:
+            # Try UFW first (Ubuntu/Debian)
+            try:
+                # Allow UDP port 8080
+                result = subprocess.run([
+                    'sudo', 'ufw', 'allow', '8080/udp'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    print("✅ Added UDP port 8080 to UFW")
+                else:
+                    print(f"⚠️  UFW UDP result: {result.stderr}")
+                
+                # Allow TCP port 8081
+                result = subprocess.run([
+                    'sudo', 'ufw', 'allow', '8081/tcp'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    print("✅ Added TCP port 8081 to UFW")
+                else:
+                    print(f"⚠️  UFW TCP result: {result.stderr}")
+                    
+            except FileNotFoundError:
+                # Try iptables
+                print("UFW not found, trying iptables...")
+                
+                # Allow UDP port 8080
+                result = subprocess.run([
+                    'sudo', 'iptables', '-A', 'INPUT', '-p', 'udp', 
+                    '--dport', '8080', '-j', 'ACCEPT'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    print("✅ Added UDP port 8080 to iptables")
+                else:
+                    print(f"⚠️  iptables UDP result: {result.stderr}")
+                
+                # Allow TCP port 8081
+                result = subprocess.run([
+                    'sudo', 'iptables', '-A', 'INPUT', '-p', 'tcp', 
+                    '--dport', '8081', '-j', 'ACCEPT'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    print("✅ Added TCP port 8081 to iptables")
+                else:
+                    print(f"⚠️  iptables TCP result: {result.stderr}")
+                    
+        except subprocess.TimeoutExpired:
+            raise Exception("Firewall configuration timed out. Please run manually.")
+        except subprocess.CalledProcessError as e:
+            raise Exception(f"Firewall configuration failed: {e.stderr}")
+        except FileNotFoundError:
+            raise Exception("Linux firewall tools not found. Please configure manually.")
+        
+    def test_ports(self):
+        """Test if ports are available"""
+        import subprocess
+        
+        # Test UDP port 8080
+        udp_result = self.test_udp_port(8080)
+        # Test TCP port 8081
+        tcp_result = self.test_tcp_port(8081)
+        
+        result_text = f"""Port Test Results:
+
+UDP Port 8080 (Discovery): {udp_result}
+TCP Port 8081 (WebSocket): {tcp_result}
+
+If ports show as "IN USE", you need to:
+1. Close the application using those ports
+2. Configure firewall to allow these ports
+3. Restart the application"""
+        
+        QMessageBox.information(self, "Port Test Results", result_text)
+        
+    def test_udp_port(self, port):
+        """Test if UDP port is available"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(('', port))
+            sock.close()
+            return "✅ Available"
+        except OSError:
+            return "❌ IN USE"
+            
+    def test_tcp_port(self, port):
+        """Test if TCP port is available"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(('', port))
+            sock.close()
+            return "✅ Available"
+        except OSError:
+            return "❌ IN USE"
 
 class User(Base):
     __tablename__ = 'users'
@@ -67,16 +588,17 @@ class PeerDiscovery(QThread):
     """Thread for discovering peers on LAN"""
     peer_found = pyqtSignal(str, str, str)  # ip, username, uuid
     peer_lost = pyqtSignal(str)
+    port_error = pyqtSignal(str)  # port error message
     
-    def __init__(self, current_user_uuid=None, current_username=None, discovery_port=8888):
+    def __init__(self, current_user_uuid=None, current_username=None, discovery_port=8080):
         super().__init__()
         self.running = True
         self.discovered_peers = {}
         self.current_user_uuid = current_user_uuid
         self.current_username = current_username
-        # Use a simple approach: try port 8888, if it fails, use 8889, etc.
-        self.discovery_port = self.find_available_port(discovery_port)
-        self.broadcast_port = 8888  # Always broadcast to standard port
+        # Use consistent port 8080 for all peer discovery
+        self.discovery_port = discovery_port
+        self.broadcast_port = discovery_port  # Use same port for broadcast and listen
         
     def find_available_port(self, start_port):
         """Find an available port starting from start_port"""
@@ -109,16 +631,17 @@ class PeerDiscovery(QThread):
             'type': 'peer_announcement',
             'username': self.current_username or socket.gethostname(),
             'uuid': self.current_user_uuid,
-            'port': 8765,  # WebSocket port (will be handled by WebSocketServer)
+            'port': 8081,  # WebSocket port (consistent)
             'discovery_port': self.discovery_port
         })
         
         try:
             while self.running:
                 try:
-                    # Broadcast on the standard discovery port (8888) so all instances can hear each other
-                    sock.sendto(message.encode(), ('<broadcast>', self.broadcast_port))
-                    print(f"Broadcasting presence on port {self.broadcast_port}, listening on {self.discovery_port}")
+                    # Broadcast on port 8080 so all instances can hear each other
+                    sock.sendto(message.encode(), ('<broadcast>', self.discovery_port))
+                    print(f"📡 Broadcasting presence on port {self.discovery_port}")
+                    print(f"📡 Message: {message}")
                     # Use shorter sleep and check running status more frequently
                     for _ in range(50):  # 50 * 100ms = 5 seconds
                         if not self.running:
@@ -133,13 +656,17 @@ class PeerDiscovery(QThread):
     def listen_for_peers(self):
         """Listen for peer announcements"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Try to bind to broadcast port first, fallback to discovery port if needed
+        # Always use port 8080 - if busy, show error and exit
         try:
-            sock.bind(('', self.broadcast_port))
-            print(f"Listening for peers on port {self.broadcast_port}")
-        except OSError:
             sock.bind(('', self.discovery_port))
-            print(f"Listening for peers on port {self.discovery_port}")
+            print(f"✅ Listening for peers on port {self.discovery_port}")
+        except OSError as e:
+            print(f"❌ Port {self.discovery_port} is already in use!")
+            print(f"❌ Error: {e}")
+            print(f"💡 Please close the application using port {self.discovery_port} and try again.")
+            # Emit error signal to main window
+            self.port_error.emit(f"Port {self.discovery_port} is already in use by another application.\n\nPlease close the application using this port and try again.")
+            return
         sock.settimeout(1.0)
         
         try:
@@ -153,14 +680,21 @@ class PeerDiscovery(QThread):
                         username = peer_info['username']
                         peer_uuid = peer_info.get('uuid', 'unknown')
                         
+                        print(f"🔍 Received peer announcement from {username} ({ip}) with UUID {peer_uuid}")
+                        print(f"🔍 My UUID: {self.current_user_uuid}")
+                        
                         # Don't add ourselves to the peer list
                         if peer_uuid != self.current_user_uuid:
                             if ip not in self.discovered_peers:
+                                print(f"✅ Adding new peer: {username} ({ip})")
                                 self.discovered_peers[ip] = {'username': username, 'uuid': peer_uuid}
                                 self.peer_found.emit(ip, username, peer_uuid)
                             else:
                                 # Update last seen
+                                print(f"🔄 Updating existing peer: {username} ({ip})")
                                 self.discovered_peers[ip] = {'username': username, 'uuid': peer_uuid}
+                        else:
+                            print(f"🚫 Ignoring self-announcement from {username}")
                             
                 except socket.timeout:
                     continue
@@ -179,10 +713,11 @@ class PeerDiscovery(QThread):
 class WebSocketServer(QThread):
     """WebSocket server for peer-to-peer communication"""
     message_received = pyqtSignal(str, str, str)  # sender_ip, message_type, content
+    port_error = pyqtSignal(str)  # port error message
     
-    def __init__(self, port=8765):
+    def __init__(self, port=8081):
         super().__init__()
-        self.port = self.find_available_port(port)
+        self.port = port
         self.clients = {}
         self.running = True
         self.server = None
@@ -218,11 +753,19 @@ class WebSocketServer(QThread):
                 
     async def start_server(self):
         """Start the WebSocket server"""
-        self.server = await websockets.serve(self.handle_client, "0.0.0.0", self.port)
-        print(f"WebSocket server started on port {self.port}")
-        
-        # Wait for server to be closed
-        await self.server.wait_closed()
+        try:
+            self.server = await websockets.serve(self.handle_client, "0.0.0.0", self.port)
+            print(f"✅ WebSocket server started on port {self.port}")
+            
+            # Wait for server to be closed
+            await self.server.wait_closed()
+        except OSError as e:
+            print(f"❌ Port {self.port} is already in use!")
+            print(f"❌ Error: {e}")
+            print(f"💡 Please close the application using port {self.port} and try again.")
+            # Emit error signal to main window
+            self.port_error.emit(f"Port {self.port} is already in use by another application.\n\nPlease close the application using this port and try again.")
+            return
         
     def run(self):
         """Run the WebSocket server"""
@@ -552,6 +1095,9 @@ class MainWindow(QMainWindow):
         # Status bar
         self.statusBar().showMessage("Ready - Scanning for peers...")
         
+        # Create toolbar with firewall configuration
+        self.create_toolbar()
+        
     def init_database(self):
         """Initialize SQLite database"""
         self.engine = create_engine('sqlite:///peer_chat.db', echo=False)
@@ -566,6 +1112,42 @@ class MainWindow(QMainWindow):
         
         # Initialize or update current user
         self.current_user_uuid, self.current_username = self.get_or_create_user()
+        
+    def create_toolbar(self):
+        """Create toolbar with firewall configuration icon"""
+        toolbar = self.addToolBar("Main")
+        toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        
+        # Firewall configuration action
+        firewall_action = QAction("🔥 Firewall Config", self)
+        firewall_action.setToolTip("Show firewall configuration instructions")
+        firewall_action.triggered.connect(self.show_firewall_config)
+        
+        # Add icon (using emoji as fallback)
+        firewall_action.setText("🔥 Firewall Config")
+        
+        toolbar.addAction(firewall_action)
+        
+        # Add separator
+        toolbar.addSeparator()
+        
+        # Settings action
+        settings_action = QAction("⚙️ Settings", self)
+        settings_action.setToolTip("Application settings")
+        settings_action.triggered.connect(self.show_settings)
+        toolbar.addAction(settings_action)
+        
+        # About action
+        about_action = QAction("ℹ️ About", self)
+        about_action.setToolTip("About this application")
+        about_action.triggered.connect(self.show_about)
+        toolbar.addAction(about_action)
+        
+    def show_firewall_config(self):
+        """Show firewall configuration dialog"""
+        dialog = FirewallConfigDialog(self)
+        dialog.exec_()
         
     def handle_database_migration(self):
         """Handle database schema migration"""
@@ -681,11 +1263,13 @@ class MainWindow(QMainWindow):
         )
         self.discovery_thread.peer_found.connect(self.peer_widget.add_peer)
         self.discovery_thread.peer_lost.connect(self.peer_widget.remove_peer)
+        self.discovery_thread.port_error.connect(self.handle_port_error)
         self.discovery_thread.start()
         
         # Start WebSocket server
         self.websocket_server = WebSocketServer()
         self.websocket_server.message_received.connect(self.handle_message)
+        self.websocket_server.port_error.connect(self.handle_port_error)
         self.websocket_server.start()
         
     def on_peer_selected(self, ip: str, username: str, peer_uuid: str):
@@ -732,6 +1316,45 @@ class MainWindow(QMainWindow):
                 break
                 
         self.chat_widget.add_message(username, content, message_type)
+        
+    def handle_port_error(self, error_message):
+        """Handle port error and show message to user"""
+        print(f"Port error: {error_message}")
+        
+        # Show error dialog
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Port Already In Use")
+        msg_box.setText("Cannot start Peer-to-Peer Chat")
+        msg_box.setInformativeText(error_message)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
+        
+        # Close the application
+        self.close()
+        
+    def show_settings(self):
+        """Show settings dialog"""
+        QMessageBox.information(self, "Settings", "Settings functionality coming soon!")
+        
+    def show_about(self):
+        """Show about dialog"""
+        about_text = """
+        <h2>Peer-to-Peer Chat & File Sharing</h2>
+        <p><b>Version:</b> 1.0.0</p>
+        <p><b>Built with:</b> PyQt5, SQLite, SQLAlchemy, WebSockets, Cryptography</p>
+        <p><b>Features:</b></p>
+        <ul>
+        <li>Real-time peer-to-peer chat</li>
+        <li>File and image sharing</li>
+        <li>Automatic peer discovery on LAN</li>
+        <li>End-to-end encryption</li>
+        <li>Persistent user identity with UUID</li>
+        </ul>
+        <p><b>Required Ports:</b> UDP 8080, TCP 8081</p>
+        <p>Click the 🔥 Firewall Config button for setup instructions.</p>
+        """
+        QMessageBox.about(self, "About", about_text)
         
     def closeEvent(self, event):
         """Handle application close"""
