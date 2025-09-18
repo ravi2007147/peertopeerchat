@@ -681,134 +681,102 @@ class PeerDiscovery(QThread):
         self.discovered_peers = {}
         self.current_user_uuid = current_user_uuid
         self.current_username = current_username
-        # Use consistent port 8080 for all peer discovery
         self.discovery_port = discovery_port
-        self.broadcast_port = discovery_port  # Use same port for broadcast and listen
-        
-    def find_available_port(self, start_port):
-        """Find an available port starting from start_port"""
-        import socket
-        port = start_port
-        while port < start_port + 100:  # Try up to 100 ports
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.bind(('', port))
-                sock.close()
-                return port
-            except OSError:
-                port += 1
-        return start_port  # Fallback to original port
-        
+
     def run(self):
-        """Broadcast and listen for peer announcements"""
-        # Broadcast our presence
-        self.broadcast_presence()
-        
-        # Listen for other peers
+        """Run both broadcasting and listening in parallel"""
+        # Start broadcast in a background thread
+        self.broadcast_thread = threading.Thread(
+            target=self.broadcast_presence, daemon=True
+        )
+        self.broadcast_thread.start()
+
+        # Start listening in this QThread
         self.listen_for_peers()
-        
+
     def broadcast_presence(self):
         """Broadcast our presence on LAN"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         message = json.dumps({
             'type': 'peer_announcement',
             'username': self.current_username or socket.gethostname(),
             'uuid': self.current_user_uuid,
-            'port': 8081,  # WebSocket port (consistent)
+            'port': 8081,  # WebSocket port
             'discovery_port': self.discovery_port
         })
-        
+
         try:
             while self.running:
                 try:
-                    # Broadcast on port 8080 so all instances can hear each other
-                    try:
-                        sock.sendto(message.encode(), ('<broadcast>', self.discovery_port))
-                        print(f"📡 Broadcasting presence on port {self.discovery_port}")
-                        print(f"📡 Message: {message}")
-                        print(f"📡 Broadcast sent successfully to 255.255.255.255:{self.discovery_port}")
-                    except Exception as broadcast_error:
-                        print(f"❌ Broadcast failed: {broadcast_error}")
-                        print(f"❌ Error details: {type(broadcast_error).__name__}")
-                        break
-                    # Use shorter sleep and check running status more frequently
-                    for _ in range(50):  # 50 * 100ms = 5 seconds
-                        if not self.running:
-                            break
-                        self.msleep(100)
+                    sock.sendto(message.encode(), ('255.255.255.255', self.discovery_port))
+                    print(f"📡 Broadcasting presence on {self.discovery_port}")
                 except Exception as e:
-                    print(f"Broadcast error: {e}")
-                    break
+                    print(f"❌ Broadcast failed: {e}")
+                for _ in range(50):  # ~5 seconds
+                    if not self.running:
+                        break
+                    self.msleep(100)
         finally:
             sock.close()
-                
+
     def listen_for_peers(self):
         """Listen for peer announcements"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Always use port 8080 - if busy, show error and exit
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         try:
             sock.bind(('', self.discovery_port))
             print(f"✅ Listening for peers on port {self.discovery_port}")
         except OSError as e:
-            print(f"❌ Port {self.discovery_port} is already in use!")
-            print(f"❌ Error: {e}")
-            print(f"💡 Please close the application using port {self.discovery_port} and try again.")
-            # Emit error signal to main window
-            self.port_error.emit(f"Port {self.discovery_port} is already in use by another application.\n\nPlease close the application using this port and try again.")
+            self.port_error.emit(
+                f"Port {self.discovery_port} already in use.\n\n{e}"
+            )
             return
+
         sock.settimeout(1.0)
-        print(f"👂 Started listening for peers on port {self.discovery_port}")
-        
         try:
             while self.running:
                 try:
                     data, addr = sock.recvfrom(1024)
-                    print(f"📨 Received data from {addr[0]}:{addr[1]} - {len(data)} bytes")
                     peer_info = json.loads(data.decode())
-                    
+
                     if peer_info['type'] == 'peer_announcement':
                         ip = addr[0]
                         username = peer_info['username']
                         peer_uuid = peer_info.get('uuid', 'unknown')
-                        
-                        print(f"🔍 Received peer announcement from {username} ({ip}) with UUID {peer_uuid}")
-                        print(f"🔍 My UUID: {self.current_user_uuid}")
-                        
-                        # Don't add ourselves to the peer list
+
+                        # Ignore our own broadcast
                         if peer_uuid != self.current_user_uuid:
                             if ip not in self.discovered_peers:
-                                print(f"✅ Adding new peer: {username} ({ip})")
-                                self.discovered_peers[ip] = {'username': username, 'uuid': peer_uuid}
+                                self.discovered_peers[ip] = {
+                                    'username': username, 'uuid': peer_uuid
+                                }
+                                print(f"👋 Found peer: {username} ({ip}) UUID={peer_uuid}")
                                 self.peer_found.emit(ip, username, peer_uuid)
                             else:
-                                # Update last seen
-                                print(f"🔄 Updating existing peer: {username} ({ip})")
-                                self.discovered_peers[ip] = {'username': username, 'uuid': peer_uuid}
+                                # Update peer info
+                                self.discovered_peers[ip].update(
+                                    {'username': username, 'uuid': peer_uuid}
+                                )
                         else:
-                            print(f"🚫 Ignoring self-announcement from {username}")
-                            
+                            print("🚫 Ignored self-announcement")
                 except socket.timeout:
-                    # Print periodic status every 30 seconds
-                    if hasattr(self, '_last_status_time'):
-                        if time.time() - self._last_status_time > 30:
-                            print(f"👂 Still listening for peers on port {self.discovery_port}...")
-                            self._last_status_time = time.time()
-                    else:
-                        self._last_status_time = time.time()
                     continue
                 except Exception as e:
                     print(f"Listen error: {e}")
                     break
         finally:
             sock.close()
-                
+
     def stop(self):
-        print("Stopping peer discovery thread...")
+        """Stop discovery cleanly"""
+        print("🛑 Stopping peer discovery...")
         self.running = False
-        # Give the thread a moment to finish current operations
-        self.msleep(200)
+        self.wait(500)  # wait for thread to exit
+
 
 class WebSocketServer(QThread):
     """WebSocket server for peer-to-peer communication"""
@@ -1384,7 +1352,7 @@ class MainWindow(QMainWindow):
         # Start WebSocket server
         self.websocket_server = WebSocketServer()
         self.websocket_server.message_received.connect(self.handle_message)
-        self.websocket_server.port_error.connect(self.handle_port_error)
+        self.websocket_server.port_error.connect(self.handle_websocket_port_error)
         self.websocket_server.start()
         
     def on_peer_selected(self, ip: str, username: str, peer_uuid: str):
@@ -1447,6 +1415,22 @@ class MainWindow(QMainWindow):
         
         # Close the application
         self.close()
+        
+    def handle_websocket_port_error(self, error_message):
+        """Handle WebSocket port error without closing the application"""
+        print(f"WebSocket port error: {error_message}")
+        
+        # Show warning dialog but don't close the app
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("WebSocket Port Issue")
+        msg_box.setText("WebSocket server could not start")
+        msg_box.setInformativeText(f"{error_message}\n\nPeer discovery will continue, but chat functionality may be limited.")
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
+        
+        # Update status bar
+        self.statusBar().showMessage("Peer discovery active - WebSocket server unavailable")
         
     def show_settings(self):
         """Show settings dialog"""
