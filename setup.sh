@@ -21,6 +21,12 @@ pip install --upgrade pip
 echo "Installing required packages..."
 pip install -r requirements.txt
 
+# Run database migration if needed
+echo "Checking database migration..."
+if [ -f "migrate_db.py" ]; then
+    python migrate_db.py
+fi
+
 echo "Setup complete!"
 echo ""
 echo "To run the application:"

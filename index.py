@@ -12,6 +12,7 @@ import threading
 import asyncio
 import websockets
 import sqlite3
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 from cryptography.fernet import Fernet
@@ -30,18 +31,19 @@ from PyQt5.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
 
 # Database models
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
-    ip_address = Column(String(15), unique=True, nullable=False)
+    uuid = Column(String(36), unique=True, nullable=False)  # UUID string
+    ip_address = Column(String(15), nullable=False)
     username = Column(String(50), nullable=False)
     last_seen = Column(DateTime, default=datetime.utcnow)
     is_online = Column(Boolean, default=False)
+    first_seen = Column(DateTime, default=datetime.utcnow)
 
 class Message(Base):
     __tablename__ = 'messages'
@@ -53,15 +55,42 @@ class Message(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     is_encrypted = Column(Boolean, default=True)
 
+class CurrentUser(Base):
+    __tablename__ = 'current_user'
+    id = Column(Integer, primary_key=True)
+    uuid = Column(String(36), unique=True, nullable=False)
+    username = Column(String(50), nullable=False)
+    current_ip = Column(String(15), nullable=False)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
 class PeerDiscovery(QThread):
     """Thread for discovering peers on LAN"""
-    peer_found = pyqtSignal(str, str)  # ip, username
+    peer_found = pyqtSignal(str, str, str)  # ip, username, uuid
     peer_lost = pyqtSignal(str)
     
-    def __init__(self):
+    def __init__(self, current_user_uuid=None, current_username=None, discovery_port=8888):
         super().__init__()
         self.running = True
         self.discovered_peers = {}
+        self.current_user_uuid = current_user_uuid
+        self.current_username = current_username
+        # Use a simple approach: try port 8888, if it fails, use 8889, etc.
+        self.discovery_port = self.find_available_port(discovery_port)
+        self.broadcast_port = 8888  # Always broadcast to standard port
+        
+    def find_available_port(self, start_port):
+        """Find an available port starting from start_port"""
+        import socket
+        port = start_port
+        while port < start_port + 100:  # Try up to 100 ports
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.bind(('', port))
+                sock.close()
+                return port
+            except OSError:
+                port += 1
+        return start_port  # Fallback to original port
         
     def run(self):
         """Broadcast and listen for peer announcements"""
@@ -78,46 +107,74 @@ class PeerDiscovery(QThread):
         
         message = json.dumps({
             'type': 'peer_announcement',
-            'username': socket.gethostname(),
-            'port': 8765
+            'username': self.current_username or socket.gethostname(),
+            'uuid': self.current_user_uuid,
+            'port': 8765,  # WebSocket port (will be handled by WebSocketServer)
+            'discovery_port': self.discovery_port
         })
         
-        while self.running:
-            try:
-                sock.sendto(message.encode(), ('<broadcast>', 8888))
-                self.msleep(5000)  # Broadcast every 5 seconds
-            except Exception as e:
-                print(f"Broadcast error: {e}")
+        try:
+            while self.running:
+                try:
+                    # Broadcast on the standard discovery port (8888) so all instances can hear each other
+                    sock.sendto(message.encode(), ('<broadcast>', self.broadcast_port))
+                    print(f"Broadcasting presence on port {self.broadcast_port}, listening on {self.discovery_port}")
+                    # Use shorter sleep and check running status more frequently
+                    for _ in range(50):  # 50 * 100ms = 5 seconds
+                        if not self.running:
+                            break
+                        self.msleep(100)
+                except Exception as e:
+                    print(f"Broadcast error: {e}")
+                    break
+        finally:
+            sock.close()
                 
     def listen_for_peers(self):
         """Listen for peer announcements"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(('', 8888))
+        # Try to bind to broadcast port first, fallback to discovery port if needed
+        try:
+            sock.bind(('', self.broadcast_port))
+            print(f"Listening for peers on port {self.broadcast_port}")
+        except OSError:
+            sock.bind(('', self.discovery_port))
+            print(f"Listening for peers on port {self.discovery_port}")
         sock.settimeout(1.0)
         
-        while self.running:
-            try:
-                data, addr = sock.recvfrom(1024)
-                peer_info = json.loads(data.decode())
-                
-                if peer_info['type'] == 'peer_announcement':
-                    ip = addr[0]
-                    username = peer_info['username']
+        try:
+            while self.running:
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    peer_info = json.loads(data.decode())
                     
-                    if ip not in self.discovered_peers:
-                        self.discovered_peers[ip] = username
-                        self.peer_found.emit(ip, username)
-                    else:
-                        # Update last seen
-                        self.discovered_peers[ip] = username
+                    if peer_info['type'] == 'peer_announcement':
+                        ip = addr[0]
+                        username = peer_info['username']
+                        peer_uuid = peer_info.get('uuid', 'unknown')
                         
-            except socket.timeout:
-                continue
-            except Exception as e:
-                print(f"Listen error: {e}")
+                        # Don't add ourselves to the peer list
+                        if peer_uuid != self.current_user_uuid:
+                            if ip not in self.discovered_peers:
+                                self.discovered_peers[ip] = {'username': username, 'uuid': peer_uuid}
+                                self.peer_found.emit(ip, username, peer_uuid)
+                            else:
+                                # Update last seen
+                                self.discovered_peers[ip] = {'username': username, 'uuid': peer_uuid}
+                            
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(f"Listen error: {e}")
+                    break
+        finally:
+            sock.close()
                 
     def stop(self):
+        print("Stopping peer discovery thread...")
         self.running = False
+        # Give the thread a moment to finish current operations
+        self.msleep(200)
 
 class WebSocketServer(QThread):
     """WebSocket server for peer-to-peer communication"""
@@ -125,9 +182,24 @@ class WebSocketServer(QThread):
     
     def __init__(self, port=8765):
         super().__init__()
-        self.port = port
+        self.port = self.find_available_port(port)
         self.clients = {}
         self.running = True
+        self.server = None
+        
+    def find_available_port(self, start_port):
+        """Find an available port starting from start_port"""
+        import socket
+        port = start_port
+        while port < start_port + 100:  # Try up to 100 ports
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(('', port))
+                sock.close()
+                return port
+            except OSError:
+                port += 1
+        return start_port  # Fallback to original port
         
     async def handle_client(self, websocket, path):
         """Handle incoming WebSocket connections"""
@@ -146,12 +218,42 @@ class WebSocketServer(QThread):
                 
     async def start_server(self):
         """Start the WebSocket server"""
-        server = await websockets.serve(self.handle_client, "0.0.0.0", self.port)
-        await server.wait_closed()
+        self.server = await websockets.serve(self.handle_client, "0.0.0.0", self.port)
+        print(f"WebSocket server started on port {self.port}")
+        
+        # Wait for server to be closed
+        await self.server.wait_closed()
         
     def run(self):
         """Run the WebSocket server"""
-        asyncio.run(self.start_server())
+        try:
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.start_server())
+        except Exception as e:
+            print(f"WebSocket server error: {e}")
+        finally:
+            print("WebSocket server stopped")
+        
+    def stop(self):
+        """Stop the WebSocket server"""
+        print("Stopping WebSocket server...")
+        self.running = False
+        if self.server:
+            # Close all client connections
+            for client in self.clients.values():
+                try:
+                    asyncio.create_task(client.close())
+                except:
+                    pass
+            # Close the server
+            try:
+                asyncio.create_task(self.server.close())
+            except:
+                pass
+            # Clear clients
+            self.clients.clear()
         
     def send_message(self, target_ip: str, message_type: str, content: str):
         """Send message to specific peer"""
@@ -283,10 +385,11 @@ class ChatWidget(QWidget):
 
 class PeerListWidget(QWidget):
     """Widget showing available peers"""
-    peer_selected = pyqtSignal(str, str)  # ip, username
+    peer_selected = pyqtSignal(str, str, str)  # ip, username, uuid
     
     def __init__(self):
         super().__init__()
+        self.peer_data = {}  # Store peer data by IP
         self.init_ui()
         
     def init_ui(self):
@@ -308,12 +411,15 @@ class PeerListWidget(QWidget):
         
         self.setLayout(layout)
         
-    def add_peer(self, ip: str, username: str):
+    def add_peer(self, ip: str, username: str, peer_uuid: str):
         """Add peer to list"""
+        # Store peer data
+        self.peer_data[ip] = {'username': username, 'uuid': peer_uuid}
+        
         # Check if peer already exists
         for i in range(self.peer_list.count()):
             item = self.peer_list.item(i)
-            if item.text().startswith(ip):
+            if item.text().endswith(f"({ip})"):
                 self.peer_list.takeItem(i)
                 break
                 
@@ -323,6 +429,10 @@ class PeerListWidget(QWidget):
         
     def remove_peer(self, ip: str):
         """Remove peer from list"""
+        # Remove from stored data
+        if ip in self.peer_data:
+            del self.peer_data[ip]
+            
         for i in range(self.peer_list.count()):
             item = self.peer_list.item(i)
             if item.text().endswith(f"({ip})"):
@@ -337,7 +447,10 @@ class PeerListWidget(QWidget):
         # Extract IP from text like "username (192.168.1.100)"
         ip = text.split("(")[-1].rstrip(")")
         username = text.split(" (")[0]
-        self.peer_selected.emit(ip, username)
+        
+        # Get UUID from stored data
+        peer_uuid = self.peer_data.get(ip, {}).get('uuid', 'unknown')
+        self.peer_selected.emit(ip, username, peer_uuid)
 
 class MainWindow(QMainWindow):
     """Main application window"""
@@ -442,14 +555,130 @@ class MainWindow(QMainWindow):
     def init_database(self):
         """Initialize SQLite database"""
         self.engine = create_engine('sqlite:///peer_chat.db', echo=False)
+        
+        # Check if database exists and handle migration
+        self.handle_database_migration()
+        
+        # Create all tables
         Base.metadata.create_all(self.engine)
         Session = sessionmaker(bind=self.engine)
         self.db_session = Session()
         
+        # Initialize or update current user
+        self.current_user_uuid, self.current_username = self.get_or_create_user()
+        
+    def handle_database_migration(self):
+        """Handle database schema migration"""
+        try:
+            # Check if old database exists
+            if os.path.exists('peer_chat.db'):
+                # Connect to existing database
+                conn = sqlite3.connect('peer_chat.db')
+                cursor = conn.cursor()
+                
+                # Check if users table exists and has uuid column
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+                if cursor.fetchone():
+                    cursor.execute("PRAGMA table_info(users)")
+                    columns = [column[1] for column in cursor.fetchall()]
+                    
+                    if 'uuid' not in columns:
+                        print("Migrating database schema...")
+                        
+                        # Create backup
+                        import shutil
+                        shutil.copy('peer_chat.db', 'peer_chat_backup.db')
+                        print("Database backed up as peer_chat_backup.db")
+                        
+                        # Drop old tables to recreate with new schema
+                        cursor.execute("DROP TABLE IF EXISTS users")
+                        cursor.execute("DROP TABLE IF EXISTS messages")
+                        
+                        # Commit changes
+                        conn.commit()
+                        conn.close()
+                        
+                        print("Database migration completed - old schema removed")
+                    else:
+                        conn.close()
+                        print("Database schema is up to date")
+                else:
+                    conn.close()
+                    print("No existing database found, will create new one")
+                    
+        except Exception as e:
+            print(f"Database migration error: {e}")
+            # If migration fails, remove the database and start fresh
+            if os.path.exists('peer_chat.db'):
+                try:
+                    os.remove('peer_chat.db')
+                    print("Removed corrupted database, will create new one")
+                except Exception as remove_error:
+                    print(f"Could not remove corrupted database: {remove_error}")
+        
+    def get_or_create_user(self):
+        """Get existing user or create new one with UUID"""
+        # Get current IP address
+        current_ip = self.get_local_ip()
+        username = socket.gethostname()
+        
+        # Check if we have a current user record
+        current_user = self.db_session.query(CurrentUser).first()
+        
+        if current_user:
+            # Update IP if it changed
+            if current_user.current_ip != current_ip:
+                print(f"IP changed from {current_user.current_ip} to {current_ip}")
+                current_user.current_ip = current_ip
+                current_user.last_updated = datetime.utcnow()
+                self.db_session.commit()
+            
+            return current_user.uuid, current_user.username
+        else:
+            # Create new user with UUID
+            user_uuid = str(uuid.uuid4())
+            print(f"Creating new user with UUID: {user_uuid}")
+            
+            # Create current user record
+            current_user = CurrentUser(
+                uuid=user_uuid,
+                username=username,
+                current_ip=current_ip
+            )
+            self.db_session.add(current_user)
+            
+            # Create user record in users table
+            user_record = User(
+                uuid=user_uuid,
+                ip_address=current_ip,
+                username=username,
+                is_online=True
+            )
+            self.db_session.add(user_record)
+            self.db_session.commit()
+            
+            return user_uuid, username
+    
+    def get_local_ip(self):
+        """Get local IP address"""
+        try:
+            # Connect to a remote address to determine local IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except Exception:
+            # Fallback to localhost
+            return "127.0.0.1"
+        
     def start_services(self):
         """Start peer discovery and WebSocket server"""
         # Start peer discovery
-        self.discovery_thread = PeerDiscovery()
+        self.discovery_thread = PeerDiscovery(
+            current_user_uuid=self.current_user_uuid,
+            current_username=self.current_username
+        )
         self.discovery_thread.peer_found.connect(self.peer_widget.add_peer)
         self.discovery_thread.peer_lost.connect(self.peer_widget.remove_peer)
         self.discovery_thread.start()
@@ -459,10 +688,38 @@ class MainWindow(QMainWindow):
         self.websocket_server.message_received.connect(self.handle_message)
         self.websocket_server.start()
         
-    def on_peer_selected(self, ip: str, username: str):
+    def on_peer_selected(self, ip: str, username: str, peer_uuid: str):
         """Handle peer selection"""
         self.chat_widget.set_current_peer(ip, username)
         self.statusBar().showMessage(f"Connected to {username} ({ip})")
+        
+        # Update user record in database
+        self.update_peer_in_database(ip, username, peer_uuid)
+        
+    def update_peer_in_database(self, ip: str, username: str, peer_uuid: str):
+        """Update or create peer record in database"""
+        # Check if user exists by UUID
+        existing_user = self.db_session.query(User).filter_by(uuid=peer_uuid).first()
+        
+        if existing_user:
+            # Update existing user
+            if existing_user.ip_address != ip:
+                print(f"Updating peer {username} IP from {existing_user.ip_address} to {ip}")
+                existing_user.ip_address = ip
+                existing_user.last_seen = datetime.utcnow()
+                existing_user.is_online = True
+                self.db_session.commit()
+        else:
+            # Create new user record
+            print(f"Adding new peer {username} ({ip}) with UUID {peer_uuid}")
+            new_user = User(
+                uuid=peer_uuid,
+                ip_address=ip,
+                username=username,
+                is_online=True
+            )
+            self.db_session.add(new_user)
+            self.db_session.commit()
         
     def handle_message(self, sender_ip: str, message_type: str, content: str):
         """Handle incoming messages"""
@@ -478,20 +735,54 @@ class MainWindow(QMainWindow):
         
     def closeEvent(self, event):
         """Handle application close"""
-        self.discovery_thread.stop()
-        self.discovery_thread.wait()
-        self.websocket_server.running = False
-        self.websocket_server.wait()
+        print("Closing application...")
+        
+        # Stop peer discovery thread
+        if hasattr(self, 'discovery_thread') and self.discovery_thread.isRunning():
+            print("Stopping peer discovery...")
+            self.discovery_thread.stop()
+            if not self.discovery_thread.wait(2000):  # Wait up to 2 seconds
+                print("Force terminating discovery thread...")
+                self.discovery_thread.terminate()
+                self.discovery_thread.wait(1000)
+        
+        # Stop WebSocket server
+        if hasattr(self, 'websocket_server') and self.websocket_server.isRunning():
+            print("Stopping WebSocket server...")
+            self.websocket_server.stop()
+            if not self.websocket_server.wait(2000):  # Wait up to 2 seconds
+                print("Force terminating WebSocket server...")
+                self.websocket_server.terminate()
+                self.websocket_server.wait(1000)
+        
+        # Close database session
+        if hasattr(self, 'db_session'):
+            print("Closing database session...")
+            self.db_session.close()
+        
+        print("Application closed successfully")
         event.accept()
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Peer-to-Peer Chat")
     
+    # Handle Ctrl+C gracefully
+    import signal
+    def signal_handler(sig, frame):
+        print('\nReceived interrupt signal. Closing application...')
+        app.quit()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
     window = MainWindow()
     window.show()
     
-    sys.exit(app.exec_())
+    try:
+        sys.exit(app.exec_())
+    except KeyboardInterrupt:
+        print("Application interrupted by user")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
