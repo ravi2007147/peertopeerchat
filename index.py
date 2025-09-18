@@ -723,9 +723,15 @@ class PeerDiscovery(QThread):
             while self.running:
                 try:
                     # Broadcast on port 8080 so all instances can hear each other
-                    sock.sendto(message.encode(), ('<broadcast>', self.discovery_port))
-                    print(f"📡 Broadcasting presence on port {self.discovery_port}")
-                    print(f"📡 Message: {message}")
+                    try:
+                        sock.sendto(message.encode(), ('<broadcast>', self.discovery_port))
+                        print(f"📡 Broadcasting presence on port {self.discovery_port}")
+                        print(f"📡 Message: {message}")
+                        print(f"📡 Broadcast sent successfully to 255.255.255.255:{self.discovery_port}")
+                    except Exception as broadcast_error:
+                        print(f"❌ Broadcast failed: {broadcast_error}")
+                        print(f"❌ Error details: {type(broadcast_error).__name__}")
+                        break
                     # Use shorter sleep and check running status more frequently
                     for _ in range(50):  # 50 * 100ms = 5 seconds
                         if not self.running:
@@ -1326,15 +1332,30 @@ class MainWindow(QMainWindow):
             return user_uuid, username
     
     def get_local_ip(self):
-        """Get local IP address"""
+        """Get local IP address with enhanced debugging"""
         try:
             # Connect to a remote address to determine local IP
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
+            print(f"🌐 Detected local IP: {local_ip}")
+            
+            # Additional network interface debugging
+            try:
+                import platform
+                if platform.system().lower() == "windows":
+                    print(f"🪟 Running on Windows - IP: {local_ip}")
+                elif platform.system().lower() == "darwin":
+                    print(f"🍎 Running on macOS - IP: {local_ip}")
+                else:
+                    print(f"🐧 Running on Linux - IP: {local_ip}")
+            except:
+                pass
+                
             return local_ip
-        except Exception:
+        except Exception as e:
+            print(f"⚠️  Failed to detect local IP: {e}")
             # Fallback to localhost
             return "127.0.0.1"
         
