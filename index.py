@@ -157,6 +157,23 @@ class FirewallConfigDialog(QDialog):
             }
         """)
         
+        # Cleanup ports button
+        cleanup_btn = QPushButton("🧹 Cleanup Ports")
+        cleanup_btn.clicked.connect(self.cleanup_ports)
+        cleanup_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f39c12;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e67e22;
+            }
+        """)
+        
         # Copy to clipboard button
         copy_btn = QPushButton("📋 Copy Instructions")
         copy_btn.clicked.connect(self.copy_instructions)
@@ -193,6 +210,7 @@ class FirewallConfigDialog(QDialog):
         
         button_layout.addWidget(auto_btn)
         button_layout.addWidget(test_btn)
+        button_layout.addWidget(cleanup_btn)
         button_layout.addWidget(copy_btn)
         button_layout.addStretch()
         button_layout.addWidget(close_btn)
@@ -345,6 +363,72 @@ sudo iptables -L
         clipboard = QApplication.clipboard()
         clipboard.setText(self.instructions_text.toPlainText())
         QMessageBox.information(self, "Copied", "Instructions copied to clipboard!")
+        
+    def cleanup_ports(self):
+        """Clean up processes using ports 8080 and 8081"""
+        import subprocess
+        
+        # Ask for confirmation
+        reply = QMessageBox.question(
+            self, 
+            "Cleanup Ports", 
+            "Kill all processes using ports 8080 and 8081?\n\nThis will:\n- Kill any processes using UDP port 8080\n- Kill any processes using TCP port 8081\n- Free up ports for Peer-to-Peer Chat\n\nNote: This may close other applications using these ports.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+            
+        try:
+            killed_processes = []
+            
+            # Kill processes using port 8080
+            try:
+                result = subprocess.run(['lsof', '-ti', ':8080'], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    for pid in pids:
+                        if pid.strip():
+                            subprocess.run(['kill', '-9', pid.strip()], timeout=5)
+                            killed_processes.append(f"Port 8080: PID {pid.strip()}")
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                pass
+            
+            # Kill processes using port 8081
+            try:
+                result = subprocess.run(['lsof', '-ti', ':8081'], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    for pid in pids:
+                        if pid.strip():
+                            subprocess.run(['kill', '-9', pid.strip()], timeout=5)
+                            killed_processes.append(f"Port 8081: PID {pid.strip()}")
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                pass
+            
+            if killed_processes:
+                QMessageBox.information(
+                    self, 
+                    "Ports Cleaned Up", 
+                    f"Successfully killed processes:\n\n" + "\n".join(killed_processes) + "\n\nPorts 8080 and 8081 are now available!"
+                )
+            else:
+                QMessageBox.information(
+                    self, 
+                    "No Processes Found", 
+                    "No processes were found using ports 8080 or 8081.\n\nBoth ports are already available!"
+                )
+                
+            # Test ports after cleanup
+            self.test_ports()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self, 
+                "Cleanup Failed", 
+                f"Failed to cleanup ports:\n\n{str(e)}\n\nPlease try manual cleanup or restart your system."
+            )
         
     def auto_configure_firewall(self):
         """Automatically configure firewall for the current platform"""
