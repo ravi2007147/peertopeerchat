@@ -14,6 +14,7 @@ import websockets
 import sqlite3
 import uuid
 import platform
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 from cryptography.fernet import Fernet
@@ -758,11 +759,13 @@ class PeerDiscovery(QThread):
             self.port_error.emit(f"Port {self.discovery_port} is already in use by another application.\n\nPlease close the application using this port and try again.")
             return
         sock.settimeout(1.0)
+        print(f"👂 Started listening for peers on port {self.discovery_port}")
         
         try:
             while self.running:
                 try:
                     data, addr = sock.recvfrom(1024)
+                    print(f"📨 Received data from {addr[0]}:{addr[1]} - {len(data)} bytes")
                     peer_info = json.loads(data.decode())
                     
                     if peer_info['type'] == 'peer_announcement':
@@ -787,6 +790,13 @@ class PeerDiscovery(QThread):
                             print(f"🚫 Ignoring self-announcement from {username}")
                             
                 except socket.timeout:
+                    # Print periodic status every 30 seconds
+                    if hasattr(self, '_last_status_time'):
+                        if time.time() - self._last_status_time > 30:
+                            print(f"👂 Still listening for peers on port {self.discovery_port}...")
+                            self._last_status_time = time.time()
+                    else:
+                        self._last_status_time = time.time()
                     continue
                 except Exception as e:
                     print(f"Listen error: {e}")
