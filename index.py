@@ -674,7 +674,7 @@ class PeerDiscovery(QThread):
     peer_found = pyqtSignal(str, str, str)  # ip, username, uuid
     peer_lost = pyqtSignal(str)
     port_error = pyqtSignal(str)  # port error message
-    
+
     def __init__(self, current_user_uuid=None, current_username=None, discovery_port=8080):
         super().__init__()
         self.running = True
@@ -684,15 +684,14 @@ class PeerDiscovery(QThread):
         self.discovery_port = discovery_port
 
     def run(self):
-        """Run both broadcasting and listening in parallel"""
-        # Start broadcast in a background thread
-        self.broadcast_thread = threading.Thread(
-            target=self.broadcast_presence, daemon=True
-        )
-        self.broadcast_thread.start()
-
-        # Start listening in this QThread
-        self.listen_for_peers()
+        print("🚀 PeerDiscovery thread started")
+        # Launch broadcast in a background thread
+        threading.Thread(target=self.broadcast_presence, daemon=True).start()
+        # Launch listener in another background thread
+        threading.Thread(target=self.listen_for_peers, daemon=True).start()
+        # Keep QThread alive
+        while self.running:
+            self.msleep(200)
 
     def broadcast_presence(self):
         """Broadcast our presence on LAN"""
@@ -704,7 +703,7 @@ class PeerDiscovery(QThread):
             'type': 'peer_announcement',
             'username': self.current_username or socket.gethostname(),
             'uuid': self.current_user_uuid,
-            'port': 8081,  # WebSocket port
+            'port': 8081,
             'discovery_port': self.discovery_port
         })
 
@@ -718,12 +717,13 @@ class PeerDiscovery(QThread):
                 for _ in range(50):  # ~5 seconds
                     if not self.running:
                         break
-                    self.msleep(100)
+                    time.sleep(0.1)
         finally:
             sock.close()
 
     def listen_for_peers(self):
         """Listen for peer announcements"""
+        print("👂 Starting listener...")
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -731,9 +731,8 @@ class PeerDiscovery(QThread):
             sock.bind(('', self.discovery_port))
             print(f"✅ Listening for peers on port {self.discovery_port}")
         except OSError as e:
-            self.port_error.emit(
-                f"Port {self.discovery_port} already in use.\n\n{e}"
-            )
+            print(f"❌ Could not bind port {self.discovery_port}: {e}")
+            self.port_error.emit(f"Port {self.discovery_port} already in use.\n\n{e}")
             return
 
         sock.settimeout(1.0)
@@ -742,25 +741,20 @@ class PeerDiscovery(QThread):
                 try:
                     data, addr = sock.recvfrom(1024)
                     peer_info = json.loads(data.decode())
+                    print(f"📥 Received from {addr}: {peer_info}")
 
                     if peer_info['type'] == 'peer_announcement':
                         ip = addr[0]
                         username = peer_info['username']
                         peer_uuid = peer_info.get('uuid', 'unknown')
 
-                        # Ignore our own broadcast
                         if peer_uuid != self.current_user_uuid:
                             if ip not in self.discovered_peers:
-                                self.discovered_peers[ip] = {
-                                    'username': username, 'uuid': peer_uuid
-                                }
+                                self.discovered_peers[ip] = {'username': username, 'uuid': peer_uuid}
                                 print(f"👋 Found peer: {username} ({ip}) UUID={peer_uuid}")
                                 self.peer_found.emit(ip, username, peer_uuid)
                             else:
-                                # Update peer info
-                                self.discovered_peers[ip].update(
-                                    {'username': username, 'uuid': peer_uuid}
-                                )
+                                self.discovered_peers[ip].update({'username': username, 'uuid': peer_uuid})
                         else:
                             print("🚫 Ignored self-announcement")
                 except socket.timeout:
@@ -775,7 +769,7 @@ class PeerDiscovery(QThread):
         """Stop discovery cleanly"""
         print("🛑 Stopping peer discovery...")
         self.running = False
-        self.wait(500)  # wait for thread to exit
+        self.wait(500)
 
 
 class WebSocketServer(QThread):
