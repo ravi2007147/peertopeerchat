@@ -27,10 +27,361 @@ from PyQt5.QtWidgets import (
     QTextEdit, QLineEdit, QPushButton, QListWidget, QLabel, QSplitter,
     QScrollArea, QFrame, QFileDialog, QMessageBox, QProgressBar,
     QTabWidget, QGroupBox, QGridLayout, QComboBox, QSpinBox,
-    QDialog, QAction
+    QDialog, QAction, QDialogButtonBox, QListWidgetItem, QSystemTrayIcon,
+    QMenu, QCheckBox, QSlider
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QDateTime
 from PyQt5.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
+
+class NotificationSettingsDialog(QDialog):
+    """Dialog for notification settings"""
+    
+    def __init__(self, notification_manager, parent=None):
+        super().__init__(parent)
+        self.notification_manager = notification_manager
+        self.init_ui()
+        
+    def init_ui(self):
+        """Initialize the UI"""
+        self.setWindowTitle("Notification Settings")
+        self.setModal(True)
+        self.resize(400, 200)
+        
+        layout = QVBoxLayout()
+        
+        # Title
+        title_label = QLabel("Notification Settings")
+        title_label.setFont(QFont("Arial", 14, QFont.Bold))
+        layout.addWidget(title_label)
+        
+        # Enable notifications checkbox
+        self.enable_notifications = QCheckBox("Enable desktop notifications")
+        self.enable_notifications.setChecked(self.notification_manager.notifications_enabled)
+        self.enable_notifications.toggled.connect(self.toggle_notifications)
+        layout.addWidget(self.enable_notifications)
+        
+        # Notification info
+        info_label = QLabel("""
+Notifications will appear when:
+• You receive new messages
+• Files are transferred
+• The application is in the background
+
+Click on notifications to bring the application to the front.
+        """)
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box.accepted.connect(self.accept)
+        layout.addWidget(button_box)
+        
+        self.setLayout(layout)
+    
+    def toggle_notifications(self, enabled):
+        """Toggle notification settings"""
+        self.notification_manager.set_notifications_enabled(enabled)
+
+# Notification Classes
+class NotificationManager:
+    """Manages desktop notifications and system tray"""
+    
+    def __init__(self, main_window):
+        self.main_window = main_window
+        self.system_tray = None
+        self.notifications_enabled = True
+        self.init_system_tray()
+    
+    def init_system_tray(self):
+        """Initialize system tray icon"""
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.system_tray = QSystemTrayIcon(self.main_window)
+            
+            # Create tray icon (using a simple icon for now)
+            icon = QIcon()
+            # You can replace this with a proper icon file
+            pixmap = QPixmap(32, 32)
+            pixmap.fill(QColor(100, 150, 200))
+            icon.addPixmap(pixmap)
+            self.system_tray.setIcon(icon)
+            
+            # Create context menu
+            tray_menu = QMenu()
+            
+            show_action = QAction("Show", self.main_window)
+            show_action.triggered.connect(self.main_window.show)
+            tray_menu.addAction(show_action)
+            
+            quit_action = QAction("Quit", self.main_window)
+            quit_action.triggered.connect(self.main_window.close)
+            tray_menu.addAction(quit_action)
+            
+            self.system_tray.setContextMenu(tray_menu)
+            self.system_tray.activated.connect(self.tray_icon_activated)
+            self.system_tray.show()
+    
+    def tray_icon_activated(self, reason):
+        """Handle system tray icon activation"""
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.main_window.show()
+            self.main_window.raise_()
+            self.main_window.activateWindow()
+    
+    def show_notification(self, title: str, message: str, sender: str = None):
+        """Show desktop notification"""
+        if not self.notifications_enabled:
+            return
+            
+        if self.system_tray and self.system_tray.isVisible():
+            # Show system tray notification
+            self.system_tray.showMessage(
+                title,
+                message,
+                QSystemTrayIcon.Information,
+                5000  # 5 seconds
+            )
+        else:
+            # Fallback: show message box
+            QMessageBox.information(self.main_window, title, message)
+    
+    def show_message_notification(self, sender: str, message: str, message_type: str = "text"):
+        """Show notification for incoming message"""
+        if message_type == "text":
+            title = f"New message from {sender}"
+            preview = message[:50] + "..." if len(message) > 50 else message
+        elif message_type == "file":
+            title = f"File received from {sender}"
+            preview = f"File: {message}"
+        elif message_type == "image":
+            title = f"Image received from {sender}"
+            preview = f"Image: {message}"
+        else:
+            title = f"Message from {sender}"
+            preview = message
+        
+        self.show_notification(title, preview, sender)
+    
+    def set_notifications_enabled(self, enabled: bool):
+        """Enable or disable notifications"""
+        self.notifications_enabled = enabled
+
+# File Transfer Classes
+class FileTransfer(QThread):
+    """Thread for handling file transfers with progress tracking"""
+    progress_updated = pyqtSignal(int, int, str)  # current, total, status
+    transfer_completed = pyqtSignal(bool, str)  # success, message
+    transfer_paused = pyqtSignal()
+    transfer_resumed = pyqtSignal()
+    
+    def __init__(self, file_path: str, target_ip: str, websocket, transfer_id: str):
+        super().__init__()
+        self.file_path = file_path
+        self.target_ip = target_ip
+        self.websocket = websocket
+        self.transfer_id = transfer_id
+        self.file_size = os.path.getsize(file_path)
+        self.chunk_size = 8192  # 8KB chunks
+        self.paused = False
+        self.cancelled = False
+        self.bytes_sent = 0
+        
+    def run(self):
+        """Execute file transfer"""
+        try:
+            self.progress_updated.emit(0, self.file_size, "Starting transfer...")
+            
+            with open(self.file_path, 'rb') as file:
+                while self.bytes_sent < self.file_size and not self.cancelled:
+                    # Check if paused
+                    while self.paused and not self.cancelled:
+                        self.msleep(100)
+                    
+                    if self.cancelled:
+                        break
+                    
+                    # Read chunk
+                    chunk_size = min(self.chunk_size, self.file_size - self.bytes_sent)
+                    chunk = file.read(chunk_size)
+                    
+                    if not chunk:
+                        break
+                    
+                    # Send chunk via WebSocket
+                    message = {
+                        'type': 'file_chunk',
+                        'transfer_id': self.transfer_id,
+                        'chunk_data': base64.b64encode(chunk).decode(),
+                        'chunk_index': self.bytes_sent // self.chunk_size,
+                        'total_chunks': (self.file_size + self.chunk_size - 1) // self.chunk_size,
+                        'file_size': self.file_size,
+                        'filename': os.path.basename(self.file_path)
+                    }
+                    
+                    # Send asynchronously
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.websocket.send(json.dumps(message)))
+                    loop.close()
+                    
+                    self.bytes_sent += len(chunk)
+                    progress = int((self.bytes_sent / self.file_size) * 100)
+                    self.progress_updated.emit(self.bytes_sent, self.file_size, f"Sending... {progress}%")
+                    
+                    # Small delay to prevent overwhelming the network
+                    self.msleep(10)
+            
+            if not self.cancelled:
+                self.transfer_completed.emit(True, "Transfer completed successfully")
+            else:
+                self.transfer_completed.emit(False, "Transfer cancelled")
+                
+        except Exception as e:
+            self.transfer_completed.emit(False, f"Transfer failed: {str(e)}")
+    
+    def pause_transfer(self):
+        """Pause the transfer"""
+        self.paused = True
+        self.transfer_paused.emit()
+    
+    def resume_transfer(self):
+        """Resume the transfer"""
+        self.paused = False
+        self.transfer_resumed.emit()
+    
+    def cancel_transfer(self):
+        """Cancel the transfer"""
+        self.cancelled = True
+
+class FileTransferDialog(QDialog):
+    """Dialog for showing file transfer progress and controls"""
+    
+    def __init__(self, file_path: str, target_ip: str, websocket, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.target_ip = target_ip
+        self.websocket = websocket
+        self.transfer_id = str(uuid.uuid4())
+        self.transfer_thread = None
+        self.init_ui()
+        
+    def init_ui(self):
+        """Initialize the UI"""
+        self.setWindowTitle("File Transfer")
+        self.setModal(False)
+        self.resize(500, 200)
+        
+        layout = QVBoxLayout()
+        
+        # File info
+        file_info = QLabel(f"File: {os.path.basename(self.file_path)}")
+        file_info.setFont(QFont("Arial", 10, QFont.Bold))
+        layout.addWidget(file_info)
+        
+        target_info = QLabel(f"To: {self.target_ip}")
+        layout.addWidget(target_info)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        layout.addWidget(self.progress_bar)
+        
+        # Status label
+        self.status_label = QLabel("Preparing transfer...")
+        layout.addWidget(self.status_label)
+        
+        # Control buttons
+        button_layout = QHBoxLayout()
+        
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.clicked.connect(self.pause_transfer)
+        button_layout.addWidget(self.pause_button)
+        
+        self.resume_button = QPushButton("Resume")
+        self.resume_button.clicked.connect(self.resume_transfer)
+        self.resume_button.setEnabled(False)
+        button_layout.addWidget(self.resume_button)
+        
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_transfer)
+        button_layout.addWidget(self.cancel_button)
+        
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        self.close_button.setEnabled(False)
+        button_layout.addWidget(self.close_button)
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+        
+        # Start transfer
+        self.start_transfer()
+    
+    def start_transfer(self):
+        """Start the file transfer"""
+        self.transfer_thread = FileTransfer(
+            self.file_path, self.target_ip, self.websocket, self.transfer_id
+        )
+        self.transfer_thread.progress_updated.connect(self.update_progress)
+        self.transfer_thread.transfer_completed.connect(self.transfer_finished)
+        self.transfer_thread.transfer_paused.connect(self.transfer_paused)
+        self.transfer_thread.transfer_resumed.connect(self.transfer_resumed)
+        self.transfer_thread.start()
+    
+    def update_progress(self, current: int, total: int, status: str):
+        """Update progress bar and status"""
+        progress = int((current / total) * 100) if total > 0 else 0
+        self.progress_bar.setValue(progress)
+        self.status_label.setText(f"{status} ({self.format_bytes(current)} / {self.format_bytes(total)})")
+    
+    def transfer_paused(self):
+        """Handle transfer pause"""
+        self.pause_button.setEnabled(False)
+        self.resume_button.setEnabled(True)
+        self.status_label.setText("Transfer paused")
+    
+    def transfer_resumed(self):
+        """Handle transfer resume"""
+        self.pause_button.setEnabled(True)
+        self.resume_button.setEnabled(False)
+        self.status_label.setText("Transfer resumed")
+    
+    def transfer_finished(self, success: bool, message: str):
+        """Handle transfer completion"""
+        self.pause_button.setEnabled(False)
+        self.resume_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.close_button.setEnabled(True)
+        
+        if success:
+            self.status_label.setText("Transfer completed successfully")
+            self.progress_bar.setValue(100)
+        else:
+            self.status_label.setText(f"Transfer failed: {message}")
+    
+    def pause_transfer(self):
+        """Pause the transfer"""
+        if self.transfer_thread:
+            self.transfer_thread.pause_transfer()
+    
+    def resume_transfer(self):
+        """Resume the transfer"""
+        if self.transfer_thread:
+            self.transfer_thread.resume_transfer()
+    
+    def cancel_transfer(self):
+        """Cancel the transfer"""
+        if self.transfer_thread:
+            self.transfer_thread.cancel_transfer()
+        self.close()
+    
+    def format_bytes(self, bytes_count: int) -> str:
+        """Format bytes to human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_count < 1024.0:
+                return f"{bytes_count:.1f} {unit}"
+            bytes_count /= 1024.0
+        return f"{bytes_count:.1f} TB"
 
 # Database models
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean
@@ -783,6 +1134,7 @@ class WebSocketServer(QThread):
         self.clients = {}
         self.running = True
         self.server = None
+        self.active_transfers = {}  # Store active file transfers
         
     def find_available_port(self, start_port):
         """Find an available port starting from start_port"""
@@ -806,12 +1158,73 @@ class WebSocketServer(QThread):
         try:
             async for message in websocket:
                 data = json.loads(message)
-                self.message_received.emit(client_ip, data['type'], data['content'])
+                
+                # Handle different message types
+                if data['type'] == 'file_chunk':
+                    await self.handle_file_chunk(client_ip, data)
+                else:
+                    # Handle regular messages
+                    self.message_received.emit(client_ip, data['type'], data['content'])
+                    
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
             if client_ip in self.clients:
                 del self.clients[client_ip]
+    
+    async def handle_file_chunk(self, client_ip: str, data: dict):
+        """Handle incoming file chunks"""
+        transfer_id = data['transfer_id']
+        chunk_data = base64.b64decode(data['chunk_data'])
+        chunk_index = data['chunk_index']
+        total_chunks = data['total_chunks']
+        filename = data['filename']
+        
+        # Initialize transfer if first chunk
+        if transfer_id not in self.active_transfers:
+            self.active_transfers[transfer_id] = {
+                'filename': filename,
+                'sender_ip': client_ip,
+                'chunks': {},
+                'total_chunks': total_chunks,
+                'file_size': data['file_size']
+            }
+        
+        # Store chunk
+        self.active_transfers[transfer_id]['chunks'][chunk_index] = chunk_data
+        
+        # Check if all chunks received
+        if len(self.active_transfers[transfer_id]['chunks']) == total_chunks:
+            await self.complete_file_transfer(transfer_id)
+    
+    async def complete_file_transfer(self, transfer_id: str):
+        """Complete file transfer by assembling chunks"""
+        transfer = self.active_transfers[transfer_id]
+        filename = transfer['filename']
+        sender_ip = transfer['sender_ip']
+        
+        try:
+            # Create downloads directory if it doesn't exist
+            downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads", "PeerToPeerChat")
+            os.makedirs(downloads_dir, exist_ok=True)
+            
+            # Assemble file
+            file_path = os.path.join(downloads_dir, filename)
+            with open(file_path, 'wb') as f:
+                for i in range(transfer['total_chunks']):
+                    if i in transfer['chunks']:
+                        f.write(transfer['chunks'][i])
+            
+            # Notify about completed file
+            self.message_received.emit(sender_ip, 'file_completed', filename)
+            print(f"✅ File transfer completed: {filename} from {sender_ip}")
+            
+        except Exception as e:
+            print(f"❌ Error completing file transfer: {e}")
+            self.message_received.emit(sender_ip, 'file_error', str(e))
+        finally:
+            # Clean up transfer
+            del self.active_transfers[transfer_id]
                 
     async def start_server(self):
         """Start the WebSocket server"""
@@ -932,16 +1345,24 @@ class ChatWidget(QWidget):
         self.peer_label.setText(f"Chatting with {peer_name} ({peer_ip})")
         self.load_chat_history(peer_ip)
         
-    def add_message(self, sender: str, message: str, message_type: str = "text"):
-        """Add message to chat area"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
+    def add_message(self, sender: str, message: str, message_type: str = "text", timestamp: str = None):
+        """Add message to chat area with timestamp"""
+        if timestamp:
+            try:
+                # Parse ISO timestamp
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                formatted_time = dt.strftime("%H:%M:%S")
+            except:
+                formatted_time = datetime.now().strftime("%H:%M:%S")
+        else:
+            formatted_time = datetime.now().strftime("%H:%M:%S")
         
         if message_type == "text":
-            self.chat_area.append(f"[{timestamp}] {sender}: {message}")
+            self.chat_area.append(f"[{formatted_time}] {sender}: {message}")
         elif message_type == "image":
-            self.chat_area.append(f"[{timestamp}] {sender}: [Image: {message}]")
+            self.chat_area.append(f"[{formatted_time}] {sender}: [Image: {message}]")
         elif message_type == "file":
-            self.chat_area.append(f"[{timestamp}] {sender}: [File: {message}]")
+            self.chat_area.append(f"[{formatted_time}] {sender}: [File: {message}]")
             
         # Auto-scroll to bottom
         scrollbar = self.chat_area.verticalScrollBar()
@@ -955,7 +1376,12 @@ class ChatWidget(QWidget):
         message = self.message_input.text().strip()
         if message:
             self.add_message("You", message)
-            # Emit signal to send message via WebSocket
+            # Send message via WebSocket
+            main_window = self.parent()
+            if hasattr(main_window, 'send_message_to_peer'):
+                success = main_window.send_message_to_peer(self.current_peer, "text", message)
+                if not success:
+                    self.add_message("System", "Failed to send message - no connection to peer")
             self.message_input.clear()
             
     def send_file(self):
@@ -969,6 +1395,17 @@ class ChatWidget(QWidget):
             filename = os.path.basename(file_path)
             self.add_message("You", filename, "file")
             
+            # Get main window and WebSocket connection
+            main_window = self.parent()
+            if hasattr(main_window, 'websocket_clients') and self.current_peer in main_window.websocket_clients:
+                websocket = main_window.websocket_clients[self.current_peer]
+                
+                # Show file transfer dialog
+                transfer_dialog = FileTransferDialog(file_path, self.current_peer, websocket, main_window)
+                transfer_dialog.show()
+            else:
+                self.add_message("System", "No connection to peer - cannot send file")
+            
     def send_image(self):
         """Send image to current peer"""
         if not self.current_peer:
@@ -981,6 +1418,13 @@ class ChatWidget(QWidget):
         if file_path:
             filename = os.path.basename(file_path)
             self.add_message("You", filename, "image")
+            
+            # Send image info via WebSocket
+            main_window = self.parent()
+            if hasattr(main_window, 'send_message_to_peer'):
+                success = main_window.send_message_to_peer(self.current_peer, "image", filename)
+                if not success:
+                    self.add_message("System", "Failed to send image info - no connection to peer")
             
     def load_chat_history(self, peer_ip: str):
         """Load chat history with peer"""
@@ -1062,9 +1506,19 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        self.current_user_uuid = None
+        self.current_username = None
+        self.db_session = None
+        self.discovery_thread = None
+        self.websocket_server = None
+        self.websocket_clients = {}  # Store WebSocket client connections
+        self.file_transfers = {}  # Store active file transfers
+        self.transfer_queue = []  # Queue for pending transfers
+        self.notification_manager = None  # Will be initialized after UI
         self.init_ui()
         self.init_database()
         self.start_services()
+        self.init_notifications()
         
     def init_ui(self):
         self.setWindowTitle("Peer-to-Peer Chat & File Sharing")
@@ -1199,6 +1653,12 @@ class MainWindow(QMainWindow):
         settings_action.setToolTip("Application settings")
         settings_action.triggered.connect(self.show_settings)
         toolbar.addAction(settings_action)
+        
+        # Notification settings action
+        notification_action = QAction("🔔 Notifications", self)
+        notification_action.setToolTip("Notification settings")
+        notification_action.triggered.connect(self.show_notification_settings)
+        toolbar.addAction(notification_action)
         
         # About action
         about_action = QAction("ℹ️ About", self)
@@ -1349,14 +1809,208 @@ class MainWindow(QMainWindow):
         self.websocket_server.port_error.connect(self.handle_websocket_port_error)
         self.websocket_server.start()
         
+    def init_notifications(self):
+        """Initialize notification system"""
+        self.notification_manager = NotificationManager(self)
+        
     def on_peer_selected(self, ip: str, username: str, peer_uuid: str):
         """Handle peer selection"""
         self.chat_widget.set_current_peer(ip, username)
-        self.statusBar().showMessage(f"Connected to {username} ({ip})")
+        self.statusBar().showMessage(f"Connecting to {username} ({ip})...")
         
         # Update user record in database
         self.update_peer_in_database(ip, username, peer_uuid)
         
+        # Establish WebSocket connection to peer
+        threading.Thread(target=self.connect_to_peer_sync, args=(ip,), daemon=True).start()
+        
+    def connect_to_peer_sync(self, peer_ip: str, port: int = 8081):
+        """Synchronous wrapper for WebSocket connection"""
+        try:
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.connect_to_peer(peer_ip, port))
+        except Exception as e:
+            print(f"❌ Error in connect_to_peer_sync: {e}")
+        finally:
+            loop.close()
+        
+    async def connect_to_peer(self, peer_ip: str, port: int = 8081):
+        """Establish WebSocket connection to a peer"""
+        uri = f"ws://{peer_ip}:{port}"
+        try:
+            print(f"🔗 Connecting to peer WebSocket at {uri}")
+            websocket = await websockets.connect(uri)
+            self.websocket_clients[peer_ip] = websocket
+            print(f"✅ Connected to peer WebSocket at {uri}")
+            
+            # Update status bar
+            self.statusBar().showMessage(f"Connected to peer at {peer_ip}")
+            
+            # Start listening for messages from this peer
+            asyncio.create_task(self.listen_to_peer(peer_ip, websocket))
+            
+        except Exception as e:
+            print(f"❌ Failed to connect to peer {uri}: {e}")
+            self.statusBar().showMessage(f"Failed to connect to {peer_ip}: {str(e)}")
+            # Remove from clients if connection failed
+            if peer_ip in self.websocket_clients:
+                del self.websocket_clients[peer_ip]
+    
+    async def listen_to_peer(self, peer_ip: str, websocket):
+        """Listen for messages from a specific peer"""
+        try:
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    print(f"📨 Received from {peer_ip}: {data}")
+                    
+                    # Handle different message types
+                    sender_name = self.get_peer_username(peer_ip)
+                    timestamp = data.get('timestamp', datetime.utcnow().isoformat())
+                    
+                    if data['type'] == 'text':
+                        self.chat_widget.add_message(
+                            sender_name, 
+                            data['content'], 
+                            'text',
+                            timestamp
+                        )
+                        # Show notification if app is not in focus
+                        if self.notification_manager and not self.isActiveWindow():
+                            self.notification_manager.show_message_notification(
+                                sender_name, data['content'], 'text'
+                            )
+                    elif data['type'] == 'file':
+                        self.chat_widget.add_message(
+                            sender_name, 
+                            data['content'], 
+                            'file',
+                            timestamp
+                        )
+                        if self.notification_manager and not self.isActiveWindow():
+                            self.notification_manager.show_message_notification(
+                                sender_name, data['content'], 'file'
+                            )
+                    elif data['type'] == 'image':
+                        self.chat_widget.add_message(
+                            sender_name, 
+                            data['content'], 
+                            'image',
+                            timestamp
+                        )
+                        if self.notification_manager and not self.isActiveWindow():
+                            self.notification_manager.show_message_notification(
+                                sender_name, data['content'], 'image'
+                            )
+                    elif data['type'] == 'file_completed':
+                        self.chat_widget.add_message(
+                            sender_name, 
+                            f"File received: {data['content']}", 
+                            'file',
+                            timestamp
+                        )
+                        if self.notification_manager and not self.isActiveWindow():
+                            self.notification_manager.show_message_notification(
+                                sender_name, f"File received: {data['content']}", 'file'
+                            )
+                    elif data['type'] == 'file_error':
+                        self.chat_widget.add_message(
+                            "System", 
+                            f"File transfer error: {data['content']}", 
+                            'text',
+                            timestamp
+                        )
+                        
+                except json.JSONDecodeError as e:
+                    print(f"❌ Failed to parse message from {peer_ip}: {e}")
+                except Exception as e:
+                    print(f"❌ Error handling message from {peer_ip}: {e}")
+                    
+        except websockets.exceptions.ConnectionClosed:
+            print(f"🔌 Connection to {peer_ip} closed")
+        except Exception as e:
+            print(f"❌ Error listening to {peer_ip}: {e}")
+        finally:
+            # Clean up connection
+            if peer_ip in self.websocket_clients:
+                del self.websocket_clients[peer_ip]
+            self.statusBar().showMessage(f"Disconnected from {peer_ip}")
+    
+    def get_peer_username(self, peer_ip: str) -> str:
+        """Get username for a peer IP"""
+        for i in range(self.peer_widget.peer_list.count()):
+            item = self.peer_widget.peer_list.item(i)
+            if item.text().endswith(f"({peer_ip})"):
+                return item.text().split(" (")[0]
+        return "Unknown"
+    
+    def send_message_to_peer(self, peer_ip: str, message_type: str, content: str):
+        """Send message to a specific peer via WebSocket"""
+        if peer_ip not in self.websocket_clients:
+            print(f"⚠️ No WebSocket connection to {peer_ip}")
+            self.statusBar().showMessage(f"No connection to {peer_ip}")
+            return False
+            
+        try:
+            message = json.dumps({
+                'type': message_type,
+                'content': content,
+                'timestamp': datetime.utcnow().isoformat(),
+                'sender': self.current_username
+            })
+            
+            # Send message asynchronously in a new thread
+            def send_async():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    websocket = self.websocket_clients[peer_ip]
+                    loop.run_until_complete(websocket.send(message))
+                    print(f"📤 Sent {message_type} to {peer_ip}: {content}")
+                    loop.close()
+                except Exception as e:
+                    print(f"❌ Failed to send message to {peer_ip}: {e}")
+            
+            threading.Thread(target=send_async, daemon=True).start()
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to send message to {peer_ip}: {e}")
+            self.statusBar().showMessage(f"Failed to send message to {peer_ip}")
+            return False
+    
+    def handle_file_transfer_error(self, transfer_id: str, error_message: str):
+        """Handle file transfer errors and attempt recovery"""
+        if transfer_id in self.file_transfers:
+            transfer_info = self.file_transfers[transfer_id]
+            print(f"❌ File transfer error for {transfer_info['filename']}: {error_message}")
+            
+            # Check if file still exists
+            if os.path.exists(transfer_info['file_path']):
+                # Attempt to resume transfer
+                print(f"🔄 Attempting to resume transfer for {transfer_info['filename']}")
+                self.resume_file_transfer(transfer_id)
+            else:
+                print(f"❌ Source file no longer exists: {transfer_info['filename']}")
+                self.chat_widget.add_message("System", f"Transfer failed: Source file deleted", "text")
+                del self.file_transfers[transfer_id]
+    
+    def resume_file_transfer(self, transfer_id: str):
+        """Resume a paused or failed file transfer"""
+        if transfer_id in self.file_transfers:
+            transfer_info = self.file_transfers[transfer_id]
+            # Create new transfer dialog for resume
+            transfer_dialog = FileTransferDialog(
+                transfer_info['file_path'], 
+                transfer_info['target_ip'], 
+                transfer_info['websocket'], 
+                self
+            )
+            transfer_dialog.show()
+            del self.file_transfers[transfer_id]
+    
     def update_peer_in_database(self, ip: str, username: str, peer_uuid: str):
         """Update or create peer record in database"""
         # Check if user exists by UUID
@@ -1429,6 +2083,12 @@ class MainWindow(QMainWindow):
     def show_settings(self):
         """Show settings dialog"""
         QMessageBox.information(self, "Settings", "Settings functionality coming soon!")
+        
+    def show_notification_settings(self):
+        """Show notification settings dialog"""
+        if self.notification_manager:
+            dialog = NotificationSettingsDialog(self.notification_manager, self)
+            dialog.exec_()
         
     def show_about(self):
         """Show about dialog"""
