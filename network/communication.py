@@ -125,6 +125,7 @@ class WebSocketServer(QThread):
         self.running = True
         self.server = None
         self.active_transfers = {}  # Store active file transfers
+        self.loop = None  # Store the event loop for this server
         
     async def handle_client(self, websocket, path):
         """Handle incoming WebSocket connections"""
@@ -224,9 +225,9 @@ class WebSocketServer(QThread):
         """Run the WebSocket server"""
         try:
             # Create new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.start_server())
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(self.start_server())
         except Exception as e:
             print(f"WebSocket server error: {e}")
         finally:
@@ -253,11 +254,15 @@ class WebSocketServer(QThread):
         
     def send_message(self, target_ip: str, message_type: str, content: str):
         """Send message to specific peer"""
-        if target_ip in self.clients:
+        if target_ip in self.clients and self.loop:
             message = json.dumps({
                 'type': message_type,
                 'content': content,
                 'timestamp': datetime.utcnow().isoformat()
             })
-            asyncio.create_task(self.clients[target_ip].send(message))
+            # Use run_coroutine_threadsafe to send from the correct event loop
+            asyncio.run_coroutine_threadsafe(
+                self.clients[target_ip].send(message), 
+                self.loop
+            )
 

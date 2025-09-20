@@ -65,11 +65,15 @@ class FileTransfer(QThread):
                         'filename': os.path.basename(self.file_path)
                     }
                     
-                    # Send asynchronously
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(self.websocket.send(json.dumps(message)))
-                    loop.close()
+                    # Send chunk via WebSocket using the websocket's event loop
+                    if hasattr(self.websocket, '_loop') and self.websocket._loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self.websocket.send(json.dumps(message)), 
+                            self.websocket._loop
+                        )
+                    else:
+                        print(f"❌ WebSocket has no event loop reference")
+                        break
                     
                     self.bytes_sent += len(chunk)
                     progress = int((self.bytes_sent / self.file_size) * 100)

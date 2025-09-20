@@ -1504,6 +1504,10 @@ class PeerListWidget(QWidget):
 class MainWindow(QMainWindow):
     """Main application window"""
     
+    # Qt signals for thread-safe UI updates
+    message_signal = pyqtSignal(str, str, str, str)  # sender, type, content, timestamp
+    status_signal = pyqtSignal(str)  # status message
+    
     def __init__(self):
         super().__init__()
         self.current_user_uuid = None
@@ -1519,6 +1523,10 @@ class MainWindow(QMainWindow):
         self.init_database()
         self.start_services()
         self.init_notifications()
+        
+        # Connect signals for thread-safe UI updates
+        self.message_signal.connect(self.chat_widget.add_message)
+        self.status_signal.connect(self.statusBar().showMessage)
         
     def init_ui(self):
         self.setWindowTitle("Peer-to-Peer Chat & File Sharing")
@@ -1816,13 +1824,15 @@ class MainWindow(QMainWindow):
     def on_peer_selected(self, ip: str, username: str, peer_uuid: str):
         """Handle peer selection"""
         self.chat_widget.set_current_peer(ip, username)
-        self.statusBar().showMessage(f"Connecting to {username} ({ip})...")
+        self.status_signal.emit(f"Connecting to {username} ({ip})...")
         
         # Update user record in database
         self.update_peer_in_database(ip, username, peer_uuid)
         
         # Establish WebSocket connection to peer
-        threading.Thread(target=self.connect_to_peer_sync, args=(ip,), daemon=True).start()
+        # Only connect if we haven't already connected to this peer
+        if ip not in self.websocket_clients:
+            threading.Thread(target=self.connect_to_peer_sync, args=(ip,), daemon=True).start()
         
     def connect_to_peer_sync(self, peer_ip: str, port: int = 8081):
         """Synchronous wrapper for WebSocket connection"""
@@ -1842,18 +1852,20 @@ class MainWindow(QMainWindow):
         try:
             print(f"🔗 Connecting to peer WebSocket at {uri}")
             websocket = await websockets.connect(uri)
+            
+            # Store the websocket and its event loop reference
             self.websocket_clients[peer_ip] = websocket
             print(f"✅ Connected to peer WebSocket at {uri}")
             
             # Update status bar
-            self.statusBar().showMessage(f"Connected to peer at {peer_ip}")
+            self.status_signal.emit(f"Connected to peer at {peer_ip}")
             
-            # Start listening for messages from this peer
-            asyncio.create_task(self.listen_to_peer(peer_ip, websocket))
+            # Start listening for messages from this peer in the same event loop
+            await self.listen_to_peer(peer_ip, websocket)
             
         except Exception as e:
             print(f"❌ Failed to connect to peer {uri}: {e}")
-            self.statusBar().showMessage(f"Failed to connect to {peer_ip}: {str(e)}")
+            self.status_signal.emit(f"Failed to connect to {peer_ip}: {str(e)}")
             # Remove from clients if connection failed
             if peer_ip in self.websocket_clients:
                 del self.websocket_clients[peer_ip]
@@ -1871,10 +1883,10 @@ class MainWindow(QMainWindow):
                     timestamp = data.get('timestamp', datetime.utcnow().isoformat())
                     
                     if data['type'] == 'text':
-                        self.chat_widget.add_message(
+                        self.message_signal.emit(
                             sender_name, 
-                            data['content'], 
                             'text',
+                            data['content'], 
                             timestamp
                         )
                         # Show notification if app is not in focus
@@ -1883,10 +1895,10 @@ class MainWindow(QMainWindow):
                                 sender_name, data['content'], 'text'
                             )
                     elif data['type'] == 'file':
-                        self.chat_widget.add_message(
+                        self.message_signal.emit(
                             sender_name, 
-                            data['content'], 
                             'file',
+                            data['content'], 
                             timestamp
                         )
                         if self.notification_manager and not self.isActiveWindow():
@@ -1894,10 +1906,10 @@ class MainWindow(QMainWindow):
                                 sender_name, data['content'], 'file'
                             )
                     elif data['type'] == 'image':
-                        self.chat_widget.add_message(
+                        self.message_signal.emit(
                             sender_name, 
-                            data['content'], 
                             'image',
+                            data['content'], 
                             timestamp
                         )
                         if self.notification_manager and not self.isActiveWindow():
@@ -1905,10 +1917,10 @@ class MainWindow(QMainWindow):
                                 sender_name, data['content'], 'image'
                             )
                     elif data['type'] == 'file_completed':
-                        self.chat_widget.add_message(
+                        self.message_signal.emit(
                             sender_name, 
-                            f"File received: {data['content']}", 
                             'file',
+                            f"File received: {data['content']}", 
                             timestamp
                         )
                         if self.notification_manager and not self.isActiveWindow():
@@ -1916,10 +1928,10 @@ class MainWindow(QMainWindow):
                                 sender_name, f"File received: {data['content']}", 'file'
                             )
                     elif data['type'] == 'file_error':
-                        self.chat_widget.add_message(
+                        self.message_signal.emit(
                             "System", 
-                            f"File transfer error: {data['content']}", 
                             'text',
+                            f"File transfer error: {data['content']}", 
                             timestamp
                         )
                         
@@ -1936,7 +1948,7 @@ class MainWindow(QMainWindow):
             # Clean up connection
             if peer_ip in self.websocket_clients:
                 del self.websocket_clients[peer_ip]
-            self.statusBar().showMessage(f"Disconnected from {peer_ip}")
+            self.status_signal.emit(f"Disconnected from {peer_ip}")
     
     def get_peer_username(self, peer_ip: str) -> str:
         """Get username for a peer IP"""
@@ -1950,7 +1962,7 @@ class MainWindow(QMainWindow):
         """Send message to a specific peer via WebSocket"""
         if peer_ip not in self.websocket_clients:
             print(f"⚠️ No WebSocket connection to {peer_ip}")
-            self.statusBar().showMessage(f"No connection to {peer_ip}")
+            self.status_signal.emit(f"No connection to {peer_ip}")
             return False
             
         try:
@@ -1961,25 +1973,29 @@ class MainWindow(QMainWindow):
                 'sender': self.current_username
             })
             
-            # Send message asynchronously in a new thread
-            def send_async():
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    websocket = self.websocket_clients[peer_ip]
-                    loop.run_until_complete(websocket.send(message))
-                    print(f"📤 Sent {message_type} to {peer_ip}: {content}")
-                    loop.close()
-                except Exception as e:
-                    print(f"❌ Failed to send message to {peer_ip}: {e}")
+            websocket = self.websocket_clients[peer_ip]
             
-            threading.Thread(target=send_async, daemon=True).start()
-            return True
+            # Use run_coroutine_threadsafe to send from the correct event loop
+            # The websocket object has a reference to its event loop
+            if hasattr(websocket, '_loop') and websocket._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.safe_send(websocket, message), 
+                    websocket._loop
+                )
+                print(f"📤 Sent {message_type} to {peer_ip}: {content}")
+                return True
+            else:
+                print(f"❌ WebSocket {peer_ip} has no event loop reference")
+                return False
             
         except Exception as e:
             print(f"❌ Failed to send message to {peer_ip}: {e}")
-            self.statusBar().showMessage(f"Failed to send message to {peer_ip}")
+            self.status_signal.emit(f"Failed to send message to {peer_ip}")
             return False
+    
+    async def safe_send(self, websocket, message):
+        """Safely send a message through a websocket"""
+        await websocket.send(message)
     
     def handle_file_transfer_error(self, transfer_id: str, error_message: str):
         """Handle file transfer errors and attempt recovery"""
